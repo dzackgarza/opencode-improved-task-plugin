@@ -1,5 +1,5 @@
 {
-  "name": "@dzackgarza/improved-task",
+  "name": "@dzackgarza/opencode-plugin-improved-task",
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit"
@@ -20,7 +20,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dzackgarza/improved-task.git"
+    "url": "git+https://github.com/dzackgarza/opencode-plugin-improved-task.git"
   },
   "keywords": [
     "opencode",
