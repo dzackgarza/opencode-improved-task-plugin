@@ -1,3 +1,5 @@
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/I2I57UKJ8)
+
 # improved-task
 
 This OpenCode plugin adds the `improved_task` tool and shadows the built-in `task` tool with a plugin-backed implementation.
