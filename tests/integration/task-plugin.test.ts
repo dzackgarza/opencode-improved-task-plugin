@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 
-const OPENCODE = "/home/dzack/.opencode/bin/opencode";
-const TOOL_DIR = "/home/dzack/opencode-plugins/improved-task";
+const OPENCODE = process.env.OPENCODE_BIN || "opencode";
+const TOOL_DIR = process.cwd();
 const SEED = "SWORDFISH-TASK";
 const MAX_BUFFER = 8 * 1024 * 1024;
 

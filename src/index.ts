@@ -16,7 +16,7 @@ const OPENCODE_TRANSCRIPT_PACKAGE =
   "git+ssh://git@github.com/dzackgarza/opencode-transcripts.git";
 
 const TASK_DESCRIPTION_BASE =
-  "Delegate work to a subagent using native task lifecycle semantics. Use this when you need a specialized subagent to handle scoped work and return a result.";
+  "Use when you need a specialized subagent to handle scoped work and return a result. Delegate work to a subagent using native task lifecycle semantics.";
 const AGENT_FETCH_TIMEOUT_MS = 3000;
 const SUBAGENT_CACHE_TTL_MS = 60_000;
 const ASYNC_HEARTBEAT_INTERVAL_MS = 15_000;

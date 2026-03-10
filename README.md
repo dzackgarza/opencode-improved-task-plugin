@@ -7,7 +7,7 @@ This OpenCode plugin adds the `improved_task` tool and shadows the built-in `tas
 Install the plugin from its directory:
 
 ```bash
-cd /home/dzack/opencode-plugins/improved-task
+cd improved-task
 just install
 ```
 
@@ -15,11 +15,11 @@ Register the plugin in OpenCode via `file:`:
 
 ```json
 {
-  "plugin": ["file:///home/dzack/opencode-plugins/improved-task/"]
+  "plugin": ["file:///path/to/opencode-plugins/improved-task/"]
 }
 ```
 
-See the sample local configuration: [`improved-task/.config/opencode.json`](/home/dzack/opencode-plugins/improved-task/.config/opencode.json).
+See the sample local configuration: [`.config/opencode.json`](./.config/opencode.json).
 
 **Note:** This package depends on the OpenCode child-session lifecycle and does not function as a standalone MCP server.
 
