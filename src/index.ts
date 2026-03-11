@@ -317,8 +317,6 @@ function accumulateTokens(messages: SessionMessage[]): {
 export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
   let cachedSubagents: CachedSubagent[] = [];
   let cachedAt = 0;
-  let shadowDescription = buildTaskToolDescription([], SHADOW_TOOL_NAME);
-  let directDescription = buildTaskToolDescription([], DIRECT_TOOL_NAME);
 
   const log = async (
     level: "debug" | "info" | "warn" | "error",
@@ -424,8 +422,6 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
 
     cachedSubagents = subagents;
     cachedAt = Date.now();
-    shadowDescription = buildTaskToolDescription(subagents, SHADOW_TOOL_NAME);
-    directDescription = buildTaskToolDescription(subagents, DIRECT_TOOL_NAME);
     return subagents;
   };
 
@@ -733,11 +729,9 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
     }
   };
 
-  void fetchSubagents("plugin_init_warmup", false);
-
-  const createTaskTool = (toolName: string, description: string) =>
+  const createTaskTool = (toolName: string) =>
     tool({
-      description,
+      description: buildTaskToolDescription(cachedSubagents, toolName),
       args: {
         description: tool.schema
           .string()
@@ -890,9 +884,22 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
     });
 
   return {
+    hook: {
+      async "tool.definition"(
+        { toolID }: { toolID: string },
+        output: { description: string; parameters: unknown },
+      ) {
+        if (toolID !== DIRECT_TOOL_NAME && toolID !== SHADOW_TOOL_NAME) {
+          return;
+        }
+
+        const subagents = await fetchSubagents("tool_definition", false);
+        output.description = buildTaskToolDescription(subagents, toolID);
+      },
+    },
     tool: {
-      [DIRECT_TOOL_NAME]: createTaskTool(DIRECT_TOOL_NAME, directDescription),
-      [SHADOW_TOOL_NAME]: createTaskTool(SHADOW_TOOL_NAME, shadowDescription),
+      [DIRECT_TOOL_NAME]: createTaskTool(DIRECT_TOOL_NAME),
+      [SHADOW_TOOL_NAME]: createTaskTool(SHADOW_TOOL_NAME),
     },
   };
 };
