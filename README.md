@@ -31,7 +31,9 @@ See the sample local configuration: [`.config/opencode.json`](./.config/opencode
 
 This tool delegates work to a subagent using native task lifecycle semantics. Use it to handle scoped work through a specialized subagent.
 
-At runtime, the plugin appends the available subagent list and a verification passphrase when in test mode.
+At runtime, the plugin appends the available subagent list to the tool description.
+In test mode, the description carries a visibility passphrase and execution-result
+paths carry distinct result passphrases.
 
 #### Schema
 
@@ -72,6 +74,10 @@ report into the parent session chat when the child session completes.
 Actual TUI rendering remains a manual acceptance boundary. The plugin owns the
 shadowing and session/report contract; OpenCode owns how that contract is rendered
 in the interface.
+
+Tool-description inspection proves visibility only. Execution and resume proofs in this
+repo rely on raw tool outputs, published reports, transcripts, and result-path
+verification passphrases that are unavailable before execution.
 
 ## Dependencies
 

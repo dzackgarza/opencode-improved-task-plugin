@@ -12,6 +12,7 @@ const MANAGER_PACKAGE =
 const MAX_BUFFER = 8 * 1024 * 1024;
 const SERVER_START_TIMEOUT_MS = 60_000;
 const SESSION_TIMEOUT_MS = 240_000;
+const TEST_PASSPHRASE = process.env.IMPROVED_TASK_TEST_PASSPHRASE ?? "";
 
 type ToolState = {
   input?: Record<string, unknown>;
@@ -373,6 +374,51 @@ function parseFrontMatter(report: string) {
   };
 }
 
+function expectedPassphrase(
+  toolName: "improved_task" | "task",
+  path: "sync:new" | "sync:resume" | "async:new" | "async:resume",
+) {
+  return `Verification passphrase: ${TEST_PASSPHRASE}:${toolName}:${path}`;
+}
+
+function reportSessionID(report: string) {
+  const { metadata } = parseFrontMatter(report);
+  if (typeof metadata.session_id !== "string") {
+    throw new Error(`Missing session_id in report\n${report}`);
+  }
+  return metadata.session_id;
+}
+
+function extractSection(body: string, heading: string, nextHeading?: string) {
+  const start = body.indexOf(heading);
+  if (start < 0) {
+    throw new Error(`Missing section: ${heading}\n${body}`);
+  }
+
+  const contentStart = start + heading.length;
+  const contentEnd = nextHeading
+    ? body.indexOf(nextHeading, contentStart)
+    : body.length;
+  if (nextHeading && contentEnd < 0) {
+    throw new Error(`Missing section boundary: ${nextHeading}\n${body}`);
+  }
+
+  return body.slice(contentStart, contentEnd).trim();
+}
+
+function lastAssistantText(messages: SessionMessage[]) {
+  const assistantMessages = messages.filter((message) => {
+    return message.info?.role === "assistant";
+  });
+  const lastAssistant = assistantMessages.at(-1);
+  const text = (lastAssistant?.parts ?? [])
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text ?? "")
+    .join("\n")
+    .trim();
+  return text.length > 0 ? text : "Subagent completed without a text response.";
+}
+
 function assertHeaderOrder(body: string, headers: string[]) {
   let previousIndex = -1;
   for (const header of headers) {
@@ -384,8 +430,14 @@ function assertHeaderOrder(body: string, headers: string[]) {
 
 function assertSuccessReport(input: {
   report: string;
-  expectedToken: string;
+  childMessages: SessionMessage[];
   expectedSessionID?: string;
+  expectedPassphrasePath:
+    | "sync:new"
+    | "sync:resume"
+    | "async:new"
+    | "async:resume";
+  toolName: "improved_task" | "task";
 }) {
   const { metadata, body } = parseFrontMatter(input.report);
 
@@ -422,7 +474,13 @@ function assertSuccessReport(input: {
     "## Turn-by-Turn Summary",
     "## Completion Review",
   ]);
-  expect(body).toContain(input.expectedToken);
+  expect(
+    extractSection(
+      body,
+      "## Agent's Last Message",
+      "## Turn-by-Turn Summary",
+    ),
+  ).toBe(lastAssistantText(input.childMessages));
   expect(body).toContain("- Turns observed:");
   expect(body).toContain("- Reasoning parts observed:");
   expect(body).toContain("  - delegation:");
@@ -433,9 +491,12 @@ function assertSuccessReport(input: {
   expect(body).toContain("  - other:");
   expect(body).toContain("- Completion confidence score:");
   expect(body).toContain("Transcript saved to:");
+  expect(input.report).toContain(
+    expectedPassphrase(input.toolName, input.expectedPassphrasePath),
+  );
 
   const transcript = readFileSync(transcriptPath, "utf8");
-  expect(transcript).toContain(input.expectedToken);
+  expect(transcript).toContain(lastAssistantText(input.childMessages));
 
   return metadata;
 }
@@ -458,7 +519,6 @@ function assertRunningNotice(input: {
 function lifecyclePrompt(input: {
   toolName: "improved_task" | "task";
   mode: "sync" | "async";
-  token: string;
   sessionID?: string;
 }) {
   const sessionClause = input.sessionID
@@ -466,7 +526,7 @@ function lifecyclePrompt(input: {
     : "";
   return [
     `Use ${input.toolName} exactly once with mode=${input.mode} and subagent_type general${sessionClause}.`,
-    `In the child session, reply with ONLY ${input.token}.`,
+    "In the child session, complete a short task and answer the question 'what is 2 + 2?' in one short sentence.",
     "After the tool finishes, answer with ONLY OK.",
     `Do not inspect or use any tool other than ${input.toolName}.`,
   ].join(" ");
@@ -475,25 +535,23 @@ function lifecyclePrompt(input: {
 async function expectSyncLifecycleReport(toolName: "improved_task" | "task") {
   let parentSessionID: string | undefined;
   let childSessionID: string | undefined;
-  const firstToken =
-    toolName === "improved_task" ? "QX4N7A1P" : "LM2R8C1K";
-  const secondToken =
-    toolName === "improved_task" ? "QX4N7A2P" : "LM2R8C2K";
 
   try {
     const firstRun = runPrompt(
       lifecyclePrompt({
         toolName,
         mode: "sync",
-        token: firstToken,
       }),
     );
     parentSessionID = parseKeptSessionID(firstRun.stderr);
 
     const firstResult = await waitForToolOutputCount(parentSessionID, toolName, 1);
+    childSessionID = reportSessionID(firstResult.outputs[0]);
     const firstMetadata = assertSuccessReport({
       report: firstResult.outputs[0],
-      expectedToken: firstToken,
+      childMessages: readMessages(childSessionID),
+      expectedPassphrasePath: "sync:new",
+      toolName,
     });
     const firstPublished = await waitForCallbackReportCount(parentSessionID, 1);
     expect(firstPublished.reports[0]).toBe(firstResult.outputs[0]);
@@ -508,16 +566,18 @@ async function expectSyncLifecycleReport(toolName: "improved_task" | "task") {
       lifecyclePrompt({
         toolName,
         mode: "sync",
-        token: secondToken,
         sessionID: childSessionID,
       }),
     );
 
     const secondResult = await waitForToolOutputCount(parentSessionID, toolName, 2);
+    const secondChildMessages = readMessages(childSessionID);
     assertSuccessReport({
       report: secondResult.outputs[1],
-      expectedToken: secondToken,
+      childMessages: secondChildMessages,
       expectedSessionID: childSessionID,
+      expectedPassphrasePath: "sync:resume",
+      toolName,
     });
     const secondPublished = await waitForCallbackReportCount(parentSessionID, 2);
     expect(secondPublished.reports[1]).toBe(secondResult.outputs[1]);
@@ -534,17 +594,12 @@ async function expectSyncLifecycleReport(toolName: "improved_task" | "task") {
 async function expectAsyncLifecycleReport(toolName: "improved_task" | "task") {
   let parentSessionID: string | undefined;
   let childSessionID: string | undefined;
-  const firstToken =
-    toolName === "improved_task" ? "QX4N7B1P" : "LM2R8D1K";
-  const secondToken =
-    toolName === "improved_task" ? "QX4N7B2P" : "LM2R8D2K";
 
   try {
     const firstRun = runPrompt(
       lifecyclePrompt({
         toolName,
         mode: "async",
-        token: firstToken,
       }),
       30,
     );
@@ -562,8 +617,10 @@ async function expectAsyncLifecycleReport(toolName: "improved_task" | "task") {
     const firstCallback = await waitForCallbackReportCount(parentSessionID, 1);
     assertSuccessReport({
       report: firstCallback.reports[0],
-      expectedToken: firstToken,
+      childMessages: readMessages(childSessionID),
       expectedSessionID: childSessionID,
+      expectedPassphrasePath: "async:new",
+      toolName,
     });
     const firstReminder = await waitForReminderCount(parentSessionID, 1);
     expect(firstReminder.reminders[0]).toContain(
@@ -575,7 +632,6 @@ async function expectAsyncLifecycleReport(toolName: "improved_task" | "task") {
       lifecyclePrompt({
         toolName,
         mode: "async",
-        token: secondToken,
         sessionID: childSessionID,
       }),
       30,
@@ -594,8 +650,10 @@ async function expectAsyncLifecycleReport(toolName: "improved_task" | "task") {
     const secondCallback = await waitForCallbackReportCount(parentSessionID, 2);
     assertSuccessReport({
       report: secondCallback.reports[1],
-      expectedToken: secondToken,
+      childMessages: readMessages(childSessionID),
       expectedSessionID: childSessionID,
+      expectedPassphrasePath: "async:resume",
+      toolName,
     });
     const secondReminder = await waitForReminderCount(parentSessionID, 2);
     expect(secondReminder.reminders[1]).toContain(
@@ -611,14 +669,12 @@ async function expectInvalidSessionFallback() {
   let parentSessionID: string | undefined;
   let childSessionID: string | undefined;
   const invalidSessionID = "ses_INVALID_CHILD_SESSION_20260311";
-  const token = "ZX8M5F1Q";
 
   try {
     const run = runPrompt(
       lifecyclePrompt({
         toolName: "improved_task",
         mode: "sync",
-        token,
         sessionID: invalidSessionID,
       }),
     );
@@ -630,7 +686,9 @@ async function expectInvalidSessionFallback() {
 
     const metadata = assertSuccessReport({
       report: result.outputs[0],
-      expectedToken: token,
+      childMessages: readMessages(reportSessionID(result.outputs[0])),
+      expectedPassphrasePath: "sync:new",
+      toolName: "improved_task",
     });
     childSessionID = metadata.session_id as string;
     expect(childSessionID).not.toBe(invalidSessionID);

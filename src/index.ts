@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promises as fs } from "node:fs";
 import { execFile } from "node:child_process";
+import pkg from "../package.json" assert { type: "json" };
 
 const execFileAsync = promisify(execFile);
+const PLUGIN_VERSION = pkg.version;
 
 const DEFAULT_SUBAGENT_DESCRIPTION =
   "This subagent should only be called manually by the user.";
@@ -151,7 +153,7 @@ function buildTaskToolDescription(
   toolName: string,
 ): string {
   const lines = [
-    TASK_DESCRIPTION_BASE,
+    `${TASK_DESCRIPTION_BASE} (Plugin version: ${PLUGIN_VERSION})`,
     "",
     "Available subagent types and descriptions:",
     formatSubagentList(subagents),
