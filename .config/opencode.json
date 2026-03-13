@@ -1,9 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "model": "github-copilot/gpt-4.1",
-  "plugin": [
-    "file:///home/dzack/opencode-plugins/opencode-plugin-improved-task/src/index.ts"
-  ],
   "permission": {
     "task": "allow",
     "improved_task": "allow"
