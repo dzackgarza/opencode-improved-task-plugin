@@ -79,6 +79,20 @@ Tool-description inspection proves visibility only. Execution and resume proofs 
 repo rely on raw tool outputs, published reports, manager-rendered transcripts, and
 result-path verification passphrases that are unavailable before execution.
 
+## Environment Variables
+
+| Name | Required | Default | Controls |
+|------|----------|---------|---------|
+| `OPENCODE_BASE_URL` | Yes | — | URL of the running OpenCode server |
+| `OPENCODE_CONFIG` | No | `$PWD/.config/opencode.json` | Path to local OpenCode config |
+| `IMPROVED_TASK_TEST_PASSPHRASE` | No | — | Passphrase for integration test liveness proof |
+
+## Side Effects
+
+- Writes a Markdown transcript file to the session state directory on each completed task call.
+- `transcript_path` in the tool output points to the written file.
+- No network calls beyond the configured OpenCode server.
+
 ## Dependencies
 
 - Runtime: Bun, OpenCode, `@opencode-ai/plugin`
