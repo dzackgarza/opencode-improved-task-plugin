@@ -27,5 +27,12 @@
     "opencode",
     "plugin"
   ],
-  "funding": "https://ko-fi.com/I2I57UKJ8"
+  "funding": "https://ko-fi.com/I2I57UKJ8",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src/"
+  ]
 }
