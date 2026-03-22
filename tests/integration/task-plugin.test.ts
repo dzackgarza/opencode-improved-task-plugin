@@ -171,6 +171,15 @@ function flattenTranscriptAssistantText(turn: TranscriptTurn): string {
     .join('\n');
 }
 
+function isPublishedReportTurn(turn: TranscriptTurn): boolean {
+  return (
+    typeof turn.userPrompt === 'string' &&
+    turn.userPrompt.includes('session_id:') &&
+    turn.userPrompt.includes('transcript_path:') &&
+    turn.userPrompt.includes('## Completion Review')
+  );
+}
+
 async function readRawSessionMessages(sessionID: string): Promise<RawSessionMessage[]> {
   const response = await fetch(`${BASE_URL}/session/${sessionID}/message`);
   if (!response.ok) {
@@ -278,9 +287,7 @@ describe('improved-task plugin integration', () => {
         waitIdle(sessionID);
 
         const reportTurn = await waitForTranscriptTurn(sessionID, {
-          predicate: (turn) =>
-            typeof turn.userPrompt === 'string' &&
-            turn.userPrompt.includes(`${PASSPHRASE}:improved_task:sync:new`),
+          predicate: (turn) => isPublishedReportTurn(turn),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
         const report = reportTurn.userPrompt as string;
@@ -374,9 +381,7 @@ describe('improved-task plugin integration', () => {
         expect(initialReply).toContain('ACK');
 
         const reportTurn = await waitForTranscriptTurn(sessionID, {
-          predicate: (turn) =>
-            typeof turn.userPrompt === 'string' &&
-            turn.userPrompt.includes(`${PASSPHRASE}:improved_task:async:new`),
+          predicate: (turn) => isPublishedReportTurn(turn),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
         const report = reportTurn.userPrompt as string;
@@ -419,15 +424,9 @@ describe('improved-task plugin integration', () => {
         const firstReport = firstReportTurn.userPrompt as string;
         expect(firstReport).toContain(`${PASSPHRASE}:improved_task:sync:new`);
 
-        runOcm(['chat', sessionID, 'Reply with EXACTLY RESUMED.']);
-        waitIdle(sessionID);
-
-        const resumedTurn = await waitForTranscriptTurn(sessionID, {
-          predicate: (turn) => flattenTranscriptAssistantText(turn).includes('RESUMED'),
-          timeoutMs: ASSISTANT_REPLY_TIMEOUT_MS,
-        });
-        const resumeText = flattenTranscriptAssistantText(resumedTurn);
-        expect(resumeText).toContain('RESUMED');
+        const { stdout } = runOcm(['chat', sessionID, 'Reply with EXACTLY RESUMED.', '--json']);
+        const resumed = JSON.parse(stdout) as { assistantMessage?: string };
+        expect(resumed.assistantMessage).toContain('RESUMED');
       } finally {
         try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
       }
