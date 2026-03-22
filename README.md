@@ -21,7 +21,7 @@ direnv allow .
 just install
 ```
 
-Repo-local verification uses [`.envrc`](./.envrc), [`.config/opencode.json`](./.config/opencode.json), and a checked-in symlink under [`.config/plugins`](./.config/plugins) so OpenCode loads the real exporter without a machine-specific `file://` path.
+Repo-root [`opencode.json`](./opencode.json) is the canonical proof config for this repo. CI starts `opencode serve` from the repo root and relies on standard global-plus-project config precedence; there is no separate `.config/opencode.json` proof path.
 
 **Note:** This package depends on the OpenCode child-session lifecycle and does not function as a standalone MCP server.
 
@@ -37,14 +37,14 @@ paths carry distinct result passphrases.
 
 #### Input
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `description` | `string` | Yes | 3–5 word label for this task |
-| `prompt` | `string` | Yes | Full prompt for the subagent |
-| `subagent_type` | `string` | Yes | Name of configured subagent |
-| `mode` | `"sync" \| "async"` | No | `sync` (default) blocks until done; `async` returns immediately |
-| `timeout_ms` | `number` | No | Hard timeout in ms (default 1 800 000 = 30 min) |
-| `session_id` | `string` | No | Resume an existing session instead of creating one |
+| Field           | Type                | Required | Description                                                     |
+| --------------- | ------------------- | -------- | --------------------------------------------------------------- |
+| `description`   | `string`            | Yes      | 3–5 word label for this task                                    |
+| `prompt`        | `string`            | Yes      | Full prompt for the subagent                                    |
+| `subagent_type` | `string`            | Yes      | Name of configured subagent                                     |
+| `mode`          | `"sync" \| "async"` | No       | `sync` (default) blocks until done; `async` returns immediately |
+| `timeout_ms`    | `number`            | No       | Hard timeout in ms (default 1 800 000 = 30 min)                 |
+| `session_id`    | `string`            | No       | Resume an existing session instead of creating one              |
 
 #### Example Input
 
@@ -77,7 +77,7 @@ The report body is organized into these sections:
 - `## Completion Review`
 
 The turn summary is built from the `opencode-manager` transcript renderer plus the
-structured transcript JSON surface (`opx-session transcript --json`) plus the
+structured transcript JSON surface (`opx transcript --json`) plus the
 centralized prompt slug `micro-agents/transcript-summary` resolved through
 `ai-prompts`. It includes transcript-derived narrative bullets first, then a
 deterministic `### Observed Counts` block. `transcript_path` points to that
@@ -100,11 +100,10 @@ result-path verification passphrases that are unavailable before execution.
 
 ## Environment Variables
 
-| Name | Required | Default | Controls |
-|------|----------|---------|---------|
-| `OPENCODE_BASE_URL` | Yes | — | URL of the running OpenCode server |
-| `OPENCODE_CONFIG` | No | `$PWD/.config/opencode.json` | Path to local OpenCode config |
-| `IMPROVED_TASK_TEST_PASSPHRASE` | No | — | Passphrase for integration test liveness proof |
+| Name                            | Required | Default                      | Controls                                       |
+| ------------------------------- | -------- | ---------------------------- | ---------------------------------------------- |
+| `OPENCODE_BASE_URL`             | Yes      | —                            | URL of the running OpenCode server             |
+| `IMPROVED_TASK_TEST_PASSPHRASE` | No       | —                            | Passphrase for integration test liveness proof |
 
 ## Side Effects
 
@@ -116,7 +115,7 @@ result-path verification passphrases that are unavailable before execution.
 
 - Runtime: Bun, OpenCode, `@opencode-ai/plugin`
 - Optional local tooling: `direnv`
-- External runtime CLIs: `opx-session transcript`, `ai-prompts get`, `llm-run`
+- External runtime CLIs: `opx transcript`, `ai-prompts get`, `llm-run`
 - External contract: configured OpenCode subagents
 
 ## Checks
@@ -125,6 +124,8 @@ result-path verification passphrases that are unavailable before execution.
 direnv allow .
 just check
 ```
+
+CI is the canonical proof environment. For local debugging, start a repo-local OpenCode server from this checkout, set `OPENCODE_BASE_URL`, and then run the same `just` entrypoints.
 
 For targeted runs, keep using the canonical `justfile` entrypoints instead of direct
 `bun test` / `bunx tsc` commands:

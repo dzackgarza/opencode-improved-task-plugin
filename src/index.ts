@@ -638,6 +638,7 @@ function normalizeTranscriptDocument(input: unknown): TranscriptDocument {
 
 async function runTemplateSummary(
   transcript: TranscriptDocument,
+  model: TaskModelRef,
 ): Promise<TranscriptSummaryStructured> {
   const promptText = await loadTranscriptSummaryPrompt();
   const requestPath = join(
@@ -658,6 +659,9 @@ async function runTemplateSummary(
             data: {
               transcript,
             },
+          },
+          overrides: {
+            models: [formatModelRef(model)],
           },
         },
         null,
@@ -743,8 +747,78 @@ function normalizeTranscriptSummary(
   };
 }
 
+function compactSummaryText(text: string | undefined, fallback: string): string {
+  const normalized = text?.replace(/\s+/g, ' ').trim();
+  if (!normalized) return fallback;
+  return normalized.length <= 160 ? normalized : `${normalized.slice(0, 157)}...`;
+}
+
+function buildDeterministicTranscriptSummary(
+  transcript: TranscriptDocument,
+): TranscriptNarrativeSummary {
+  const toolCalls: TranscriptSummaryToolCall[] = [];
+  const reasoningSteps: string[] = [];
+  let outcome = emptyTranscriptNarrativeSummary().outcome;
+
+  for (const turn of transcript.turns) {
+    for (const assistantMessage of turn.assistantMessages) {
+      for (const reasoning of assistantMessage.reasoning) {
+        const normalized = compactSummaryText(
+          reasoning,
+          'Transcript reasoning step had no text.',
+        );
+        if (normalized.length > 0) {
+          reasoningSteps.push(normalized);
+        }
+      }
+
+      for (const step of assistantMessage.steps) {
+        if (step.type === 'tool' && typeof step.tool === 'string') {
+          toolCalls.push({
+            tool: step.tool,
+            purpose: compactSummaryText(
+              step.inputText,
+              `Invoked ${step.tool} without recorded input.`,
+            ),
+            result: compactSummaryText(
+              step.outputText,
+              step.status ? `Step finished with status ${step.status}.` : 'Step finished.',
+            ),
+          });
+          continue;
+        }
+
+        if (step.type.includes('reasoning') && typeof step.contentText === 'string') {
+          const normalized = compactSummaryText(
+            step.contentText,
+            'Transcript reasoning step had no text.',
+          );
+          if (normalized.length > 0) {
+            reasoningSteps.push(normalized);
+          }
+        }
+      }
+
+      if (assistantMessage.text.trim().length > 0) {
+        outcome = compactSummaryText(
+          assistantMessage.text,
+          emptyTranscriptNarrativeSummary().outcome,
+        );
+      }
+    }
+  }
+
+  return {
+    toolCalls: toolCalls.slice(0, 8),
+    reasoningSteps: [...new Set(reasoningSteps)].slice(0, 8),
+    edits: [],
+    outcome,
+  };
+}
+
 async function summarizeTranscript(input: {
   sessionID: string;
+  model: TaskModelRef;
   transcript: TranscriptDocument;
   transcriptRawText: string;
 }): Promise<TranscriptNarrativeSummary> {
@@ -753,9 +827,14 @@ async function summarizeTranscript(input: {
     return cached.summary;
   }
 
-  const summary = normalizeTranscriptSummary(
-    await runTemplateSummary(input.transcript),
-  );
+  let summary: TranscriptNarrativeSummary;
+  try {
+    summary = normalizeTranscriptSummary(
+      await runTemplateSummary(input.transcript, input.model),
+    );
+  } catch {
+    summary = buildDeterministicTranscriptSummary(input.transcript);
+  }
   transcriptSummaryCache.set(input.sessionID, {
     transcript: input.transcriptRawText,
     summary,
@@ -1076,6 +1155,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
       const transcript = await loadTranscriptArtifact(input.childSessionID);
       const narrativeSummary = await summarizeTranscript({
         sessionID: input.childSessionID,
+        model: input.model,
         transcript: transcript.document,
         transcriptRawText: transcript.rawText,
       });
