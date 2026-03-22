@@ -42,6 +42,20 @@ type RawSessionMessage = {
   } | null>;
 };
 
+type TranscriptAssistantMessage = {
+  text?: string;
+};
+
+type TranscriptTurn = {
+  userPrompt?: string;
+  systemPrompt?: string | null;
+  assistantMessages?: TranscriptAssistantMessage[];
+};
+
+type TranscriptData = {
+  turns?: TranscriptTurn[];
+};
+
 afterAll(() => {
   rmSync(OCM_TOOL_DIR, { recursive: true, force: true });
 });
@@ -122,11 +136,39 @@ function waitIdle(sessionID: string): void {
   runOcm(['wait', sessionID, '--timeout-sec=180']);
 }
 
+function readTranscript(sessionID: string): TranscriptData {
+  const result = spawnSync(
+    getOcmBinaryPath(),
+    ['transcript', sessionID, '--json'],
+    {
+      env: { ...process.env, OPENCODE_BASE_URL: BASE_URL },
+      cwd: PROJECT_DIR,
+      encoding: 'utf8',
+      timeout: SESSION_TIMEOUT_MS,
+      maxBuffer: MAX_BUFFER,
+    },
+  );
+  if (result.error) throw result.error;
+  const stdout = result.stdout?.trim() ?? '';
+  if (!stdout) {
+    const stderr = result.stderr?.trim() ?? '';
+    throw new Error(`ocm transcript ${sessionID} returned no JSON\nSTDERR:\n${stderr}`);
+  }
+  return JSON.parse(stdout) as TranscriptData;
+}
+
 function extractFrontMatterValue(text: string, key: string): string | undefined {
   const quoted = text.match(new RegExp(`^${key}:\\s*\"([^\"]+)\"$`, 'm'));
   if (quoted) return quoted[1];
   const bare = text.match(new RegExp(`^${key}:\\s*([^\\n]+)$`, 'm'));
   return bare?.[1]?.trim();
+}
+
+function flattenTranscriptAssistantText(turn: TranscriptTurn): string {
+  return (turn.assistantMessages ?? [])
+    .map((message) => message.text?.trim() ?? '')
+    .filter(Boolean)
+    .join('\n');
 }
 
 async function readRawSessionMessages(sessionID: string): Promise<RawSessionMessage[]> {
@@ -206,6 +248,25 @@ async function waitForSessionMessage(
   throw new Error(`Timed out waiting for matching ${roleLabel} message in session ${sessionID}.`);
 }
 
+async function waitForTranscriptTurn(
+  sessionID: string,
+  input: {
+    predicate: (turn: TranscriptTurn) => boolean;
+    timeoutMs: number;
+  },
+): Promise<TranscriptTurn> {
+  const deadline = Date.now() + input.timeoutMs;
+  while (Date.now() < deadline) {
+    const turns = readTranscript(sessionID).turns;
+    if (Array.isArray(turns)) {
+      const match = turns.find((turn) => input.predicate(turn));
+      if (match) return match;
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+  throw new Error(`Timed out waiting for matching transcript turn in session ${sessionID}.`);
+}
+
 describe('improved-task plugin integration', () => {
   describe('sync lifecycle', () => {
     it('proves improved_task sync delegation publishes a success report and reminder', async () => {
@@ -216,11 +277,13 @@ describe('improved-task plugin integration', () => {
       try {
         waitIdle(sessionID);
 
-        const report = await waitForSessionMessage(sessionID, {
-          predicate: (candidate) =>
-            candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
+        const reportTurn = await waitForTranscriptTurn(sessionID, {
+          predicate: (turn) =>
+            typeof turn.userPrompt === 'string' &&
+            turn.userPrompt.includes(`${PASSPHRASE}:improved_task:sync:new`),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const report = reportTurn.userPrompt as string;
         const childSessionID = extractFrontMatterValue(report, 'session_id');
         expect(childSessionID).toBeDefined();
         expectSummaryReportPrompt({
@@ -229,10 +292,13 @@ describe('improved-task plugin integration', () => {
           verificationPassphrase: `${PASSPHRASE}:improved_task:sync:new`,
         });
 
-        const reminder = await waitForSessionMessage(sessionID, {
-          predicate: (candidate) => candidate.includes('<system-reminder>'),
+        const reminderTurn = await waitForTranscriptTurn(sessionID, {
+          predicate: (turn) =>
+            typeof turn.userPrompt === 'string' &&
+            turn.userPrompt.includes('<system-reminder>'),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const reminder = reminderTurn.userPrompt as string;
         expectReminderPrompt(reminder);
       } finally {
         try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
@@ -247,10 +313,13 @@ describe('improved-task plugin integration', () => {
       try {
         waitIdle(sessionID);
 
-        const report = await waitForSessionMessage(sessionID, {
-          predicate: (candidate) => candidate.includes(`${PASSPHRASE}:task:sync:new`),
+        const reportTurn = await waitForTranscriptTurn(sessionID, {
+          predicate: (turn) =>
+            typeof turn.userPrompt === 'string' &&
+            turn.userPrompt.includes(`${PASSPHRASE}:task:sync:new`),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const report = reportTurn.userPrompt as string;
         const childSessionID = extractFrontMatterValue(report, 'session_id');
         expect(childSessionID).toBeDefined();
         expectSummaryReportPrompt({
@@ -273,11 +342,13 @@ describe('improved-task plugin integration', () => {
       try {
         waitIdle(sessionID);
 
-        const report = await waitForSessionMessage(sessionID, {
-          predicate: (candidate) =>
-            candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
+        const reportTurn = await waitForTranscriptTurn(sessionID, {
+          predicate: (turn) =>
+            typeof turn.userPrompt === 'string' &&
+            turn.userPrompt.includes(`${PASSPHRASE}:improved_task:sync:new`),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const report = reportTurn.userPrompt as string;
         const childSessionID = extractFrontMatterValue(report, 'session_id');
         expect(childSessionID).toBeDefined();
         expect(childSessionID).not.toBe(bogusSessionID);
@@ -302,11 +373,13 @@ describe('improved-task plugin integration', () => {
         });
         expect(initialReply).toContain('ACK');
 
-        const report = await waitForSessionMessage(sessionID, {
-          predicate: (candidate) =>
-            candidate.includes(`${PASSPHRASE}:improved_task:async:new`),
+        const reportTurn = await waitForTranscriptTurn(sessionID, {
+          predicate: (turn) =>
+            typeof turn.userPrompt === 'string' &&
+            turn.userPrompt.includes(`${PASSPHRASE}:improved_task:async:new`),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const report = reportTurn.userPrompt as string;
         const childSessionID = extractFrontMatterValue(report, 'session_id');
         expect(childSessionID).toBeDefined();
         expectSummaryReportPrompt({
@@ -315,10 +388,13 @@ describe('improved-task plugin integration', () => {
           verificationPassphrase: `${PASSPHRASE}:improved_task:async:new`,
         });
 
-        const reminder = await waitForSessionMessage(sessionID, {
-          predicate: (candidate) => candidate.includes('<system-reminder>'),
+        const reminderTurn = await waitForTranscriptTurn(sessionID, {
+          predicate: (turn) =>
+            typeof turn.userPrompt === 'string' &&
+            turn.userPrompt.includes('<system-reminder>'),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const reminder = reminderTurn.userPrompt as string;
         expectReminderPrompt(reminder);
       } finally {
         try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
@@ -334,21 +410,23 @@ describe('improved-task plugin integration', () => {
       const sessionID = beginSession(firstPrompt, IMPROVED_TASK_PROOF_AGENT);
       try {
         waitIdle(sessionID);
-        const firstReport = await waitForSessionMessage(sessionID, {
-          predicate: (candidate) =>
-            candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
+        const firstReportTurn = await waitForTranscriptTurn(sessionID, {
+          predicate: (turn) =>
+            typeof turn.userPrompt === 'string' &&
+            turn.userPrompt.includes(`${PASSPHRASE}:improved_task:sync:new`),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const firstReport = firstReportTurn.userPrompt as string;
         expect(firstReport).toContain(`${PASSPHRASE}:improved_task:sync:new`);
 
         runOcm(['chat', sessionID, 'Reply with EXACTLY RESUMED.']);
         waitIdle(sessionID);
 
-        const resumeText = await waitForSessionMessage(sessionID, {
-          role: 'assistant',
-          predicate: (candidate) => candidate.includes('RESUMED'),
+        const resumedTurn = await waitForTranscriptTurn(sessionID, {
+          predicate: (turn) => flattenTranscriptAssistantText(turn).includes('RESUMED'),
           timeoutMs: ASSISTANT_REPLY_TIMEOUT_MS,
         });
+        const resumeText = flattenTranscriptAssistantText(resumedTurn);
         expect(resumeText).toContain('RESUMED');
       } finally {
         try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
