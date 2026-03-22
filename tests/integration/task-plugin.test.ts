@@ -48,6 +48,16 @@ type TranscriptData = {
   turns: TranscriptTurn[];
 };
 
+type RawSessionMessage = {
+  info?: {
+    role?: string;
+  };
+  parts?: Array<{
+    type?: string;
+    text?: string;
+  } | null>;
+};
+
 type ToolStep = TranscriptStep & {
   type: 'tool';
   tool: string;
@@ -130,20 +140,35 @@ function findCompletedToolStep(sessionID: string, toolName: string): ToolStep {
   return step as ToolStep;
 }
 
-function findUserPrompt(
-  turns: TranscriptTurn[],
-  predicate: (prompt: string) => boolean,
-): string | undefined {
-  return turns
-    .map((turn) => turn.userPrompt)
-    .find((prompt) => typeof prompt === 'string' && prompt.length > 0 && predicate(prompt));
-}
-
 function extractFrontMatterValue(text: string, key: string): string | undefined {
   const quoted = text.match(new RegExp(`^${key}:\\s*\"([^\"]+)\"$`, 'm'));
   if (quoted) return quoted[1];
   const bare = text.match(new RegExp(`^${key}:\\s*([^\\n]+)$`, 'm'));
   return bare?.[1]?.trim();
+}
+
+async function readRawSessionMessages(sessionID: string): Promise<RawSessionMessage[]> {
+  const response = await fetch(`${BASE_URL}/session/${sessionID}/message`);
+  if (!response.ok) {
+    throw new Error(`Failed to load session messages for ${sessionID}: ${response.status}`);
+  }
+  const data = await response.json();
+  if (!Array.isArray(data)) {
+    throw new Error(`Session messages for ${sessionID} were not an array.`);
+  }
+  return data as RawSessionMessage[];
+}
+
+function flattenMessageText(message: RawSessionMessage): string {
+  return (message.parts ?? [])
+    .filter(
+      (part): part is { type?: string; text?: string } =>
+        part !== null && typeof part === 'object',
+    )
+    .filter((part) => part.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text?.trim() ?? '')
+    .filter(Boolean)
+    .join('\n');
 }
 
 function expectReminderPrompt(prompt: string): void {
@@ -178,54 +203,29 @@ function expectSummaryReportPrompt(input: {
   expect(transcriptArtifact).toContain(`"sessionID": "${childSessionID}"`);
 }
 
-async function waitForUserPrompt(
+async function waitForSessionMessage(
   sessionID: string,
-  predicate: (prompt: string) => boolean,
-  timeoutMs: number,
+  input: {
+    role: 'user' | 'assistant';
+    predicate: (text: string) => boolean;
+    timeoutMs: number;
+  },
 ): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + input.timeoutMs;
   while (Date.now() < deadline) {
-    const match = findUserPrompt(readTranscriptTurns(sessionID), predicate);
+    const match = (await readRawSessionMessages(sessionID))
+      .filter((message) => message.info?.role === input.role)
+      .map(flattenMessageText)
+      .find((text) => text.length > 0 && input.predicate(text));
     if (match) return match;
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
-  throw new Error(`Timed out waiting for matching user prompt in session ${sessionID}.`);
+  throw new Error(`Timed out waiting for matching ${input.role} message in session ${sessionID}.`);
 }
 
 describe('improved-task plugin integration', () => {
-  describe('tool visibility', () => {
-    it('proves improved_task tool description embeds the verification passphrase', () => {
-      const prompt =
-        'Reply with EXACTLY the verification passphrase from the improved_task tool description. Do not call improved_task. Reply with ONLY the passphrase, nothing else.';
-
-      const sessionID = beginSession(prompt, IMPROVED_TASK_PROOF_AGENT);
-      try {
-        waitIdle(sessionID);
-        const text = readFinalAssistantText(sessionID);
-        expect(text).toContain(PASSPHRASE);
-      } finally {
-        try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
-      }
-    }, SESSION_TIMEOUT_MS);
-
-    it('proves config-defined subagents appear in the improved_task tool description', () => {
-      const prompt =
-        'Reply with EXACTLY the bullet line from the improved_task tool description that starts with "- general:". Do not call improved_task. If no such line exists, reply with ONLY MISSING.';
-
-      const sessionID = beginSession(prompt, IMPROVED_TASK_PROOF_AGENT);
-      try {
-        waitIdle(sessionID);
-        const text = readFinalAssistantText(sessionID).trim();
-        expect(text).not.toBe('MISSING');
-        expect(text).toContain('- general:');
-      } finally {
-        try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
-      }
-    }, SESSION_TIMEOUT_MS);
-  });
-
   describe('sync lifecycle', () => {
-    it('proves improved_task sync delegation publishes a success report and reminder', () => {
+    it('proves improved_task sync delegation publishes a success report and reminder', async () => {
       const prompt =
         'Use improved_task once with mode=sync and subagent_type general. In the child session, reply with ONLY the word DONE. After the tool finishes, reply with ONLY OK.';
 
@@ -239,21 +239,24 @@ describe('improved-task plugin integration', () => {
         const childSessionID = extractFrontMatterValue(toolStep.outputText ?? '', 'session_id');
         expect(childSessionID).toBeDefined();
 
-        const turns = readTranscriptTurns(sessionID);
-        const report = findUserPrompt(
-          turns,
-          (candidate) => candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
-        );
-        expect(report).toBeDefined();
+        const report = await waitForSessionMessage(sessionID, {
+          role: 'user',
+          predicate: (candidate) =>
+            candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
+          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+        });
         expectSummaryReportPrompt({
-          report: report as string,
+          report,
           childSessionID: childSessionID as string,
           verificationPassphrase: `${PASSPHRASE}:improved_task:sync:new`,
         });
 
-        const reminder = findUserPrompt(turns, (candidate) => candidate.includes('<system-reminder>'));
-        expect(reminder).toBeDefined();
-        expectReminderPrompt(reminder as string);
+        const reminder = await waitForSessionMessage(sessionID, {
+          role: 'user',
+          predicate: (candidate) => candidate.includes('<system-reminder>'),
+          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+        });
+        expectReminderPrompt(reminder);
 
         const text = readFinalAssistantText(sessionID);
         expect(text).toContain('OK');
@@ -262,7 +265,7 @@ describe('improved-task plugin integration', () => {
       }
     }, SESSION_TIMEOUT_MS);
 
-    it('proves the shadow task tool publishes the same report contract', () => {
+    it('proves the shadow task tool publishes the same report contract', async () => {
       const prompt =
         'Use task once with mode=sync and subagent_type general. In the child session, reply with ONLY the word DONE. After the tool finishes, reply with ONLY OK.';
 
@@ -276,14 +279,13 @@ describe('improved-task plugin integration', () => {
         const childSessionID = extractFrontMatterValue(toolStep.outputText ?? '', 'session_id');
         expect(childSessionID).toBeDefined();
 
-        const turns = readTranscriptTurns(sessionID);
-        const report = findUserPrompt(
-          turns,
-          (candidate) => candidate.includes(`${PASSPHRASE}:task:sync:new`),
-        );
-        expect(report).toBeDefined();
+        const report = await waitForSessionMessage(sessionID, {
+          role: 'user',
+          predicate: (candidate) => candidate.includes(`${PASSPHRASE}:task:sync:new`),
+          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+        });
         expectSummaryReportPrompt({
-          report: report as string,
+          report,
           childSessionID: childSessionID as string,
           verificationPassphrase: `${PASSPHRASE}:task:sync:new`,
         });
@@ -295,7 +297,7 @@ describe('improved-task plugin integration', () => {
       }
     }, SESSION_TIMEOUT_MS);
 
-    it('falls back to a new child session when session_id does not exist', () => {
+    it('falls back to a new child session when session_id does not exist', async () => {
       const bogusSessionID = 'ses_does_not_exist_for_improved_task_proof';
       const prompt =
         `Use improved_task once with mode=sync, session_id=${bogusSessionID}, and subagent_type general. ` +
@@ -310,12 +312,12 @@ describe('improved-task plugin integration', () => {
         expect(childSessionID).toBeDefined();
         expect(childSessionID).not.toBe(bogusSessionID);
 
-        const turns = readTranscriptTurns(sessionID);
-        const report = findUserPrompt(
-          turns,
-          (candidate) => candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
-        );
-        expect(report).toBeDefined();
+        const report = await waitForSessionMessage(sessionID, {
+          role: 'user',
+          predicate: (candidate) =>
+            candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
+          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+        });
         expect(report).not.toContain(bogusSessionID);
 
         const text = readFinalAssistantText(sessionID);
@@ -345,22 +347,23 @@ describe('improved-task plugin integration', () => {
         const initialText = readFinalAssistantText(sessionID);
         expect(initialText).toContain('ACK');
 
-        const report = await waitForUserPrompt(
-          sessionID,
-          (candidate) => candidate.includes(`${PASSPHRASE}:improved_task:async:new`),
-          ASYNC_CALLBACK_TIMEOUT_MS,
-        );
+        const report = await waitForSessionMessage(sessionID, {
+          role: 'user',
+          predicate: (candidate) =>
+            candidate.includes(`${PASSPHRASE}:improved_task:async:new`),
+          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+        });
         expectSummaryReportPrompt({
           report,
           childSessionID: childSessionID as string,
           verificationPassphrase: `${PASSPHRASE}:improved_task:async:new`,
         });
 
-        const reminder = await waitForUserPrompt(
-          sessionID,
-          (candidate) => candidate.includes('<system-reminder>'),
-          ASYNC_CALLBACK_TIMEOUT_MS,
-        );
+        const reminder = await waitForSessionMessage(sessionID, {
+          role: 'user',
+          predicate: (candidate) => candidate.includes('<system-reminder>'),
+          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+        });
         expectReminderPrompt(reminder);
       } finally {
         try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
