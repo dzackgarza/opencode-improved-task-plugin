@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function requireEnv(name: string, message: string): string {
   const value = process.env[name]?.trim();
@@ -24,6 +26,8 @@ const SESSION_TIMEOUT_MS = 240_000;
 const CALLBACK_TIMEOUT_MS = 120_000;
 const ASSISTANT_REPLY_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 500;
+const OCM_TOOL_DIR = mkdtempSync(join(tmpdir(), 'ocm-tool-'));
+let ocmBinaryPath: string | undefined;
 
 const IMPROVED_TASK_PROOF_AGENT = 'improved-task-proof';
 const TASK_PROOF_AGENT = 'task-proof';
@@ -38,10 +42,41 @@ type RawSessionMessage = {
   } | null>;
 };
 
+afterAll(() => {
+  rmSync(OCM_TOOL_DIR, { recursive: true, force: true });
+});
+
+function getOcmBinaryPath(): string {
+  if (ocmBinaryPath) return ocmBinaryPath;
+  const binDir = process.platform === 'win32' ? join(OCM_TOOL_DIR, 'Scripts') : join(OCM_TOOL_DIR, 'bin');
+  const candidate = join(binDir, process.platform === 'win32' ? 'ocm.exe' : 'ocm');
+  if (!existsSync(candidate)) {
+    const install = spawnSync(
+      'uv',
+      ['tool', 'install', '--tool-dir', OCM_TOOL_DIR, '--from', MANAGER_PACKAGE, 'ocm'],
+      {
+        env: process.env,
+        cwd: PROJECT_DIR,
+        encoding: 'utf8',
+        timeout: SESSION_TIMEOUT_MS,
+        maxBuffer: MAX_BUFFER,
+      },
+    );
+    if (install.error) throw install.error;
+    if (install.status !== 0 || !existsSync(candidate)) {
+      throw new Error(
+        `Failed to install ocm\nSTDOUT:\n${install.stdout ?? ''}\nSTDERR:\n${install.stderr ?? ''}`,
+      );
+    }
+  }
+  ocmBinaryPath = candidate;
+  return candidate;
+}
+
 function runOcm(args: string[]): { stdout: string; stderr: string } {
   const result = spawnSync(
-    'uvx',
-    ['--from', MANAGER_PACKAGE, 'ocm', ...args],
+    getOcmBinaryPath(),
+    args,
     {
       env: { ...process.env, OPENCODE_BASE_URL: BASE_URL },
       cwd: PROJECT_DIR,
@@ -139,7 +174,7 @@ function expectSummaryReportPrompt(input: {
 async function waitForSessionMessage(
   sessionID: string,
   input: {
-    role: 'user' | 'assistant';
+    role?: 'user' | 'assistant';
     predicate: (text: string) => boolean;
     timeoutMs: number;
   },
@@ -147,13 +182,14 @@ async function waitForSessionMessage(
   const deadline = Date.now() + input.timeoutMs;
   while (Date.now() < deadline) {
     const match = (await readRawSessionMessages(sessionID))
-      .filter((message) => message.info?.role === input.role)
+      .filter((message) => !input.role || message.info?.role === input.role)
       .map(flattenMessageText)
       .find((text) => text.length > 0 && input.predicate(text));
     if (match) return match;
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
-  throw new Error(`Timed out waiting for matching ${input.role} message in session ${sessionID}.`);
+  const roleLabel = input.role ?? 'session';
+  throw new Error(`Timed out waiting for matching ${roleLabel} message in session ${sessionID}.`);
 }
 
 describe('improved-task plugin integration', () => {
@@ -167,7 +203,6 @@ describe('improved-task plugin integration', () => {
         waitIdle(sessionID);
 
         const report = await waitForSessionMessage(sessionID, {
-          role: 'user',
           predicate: (candidate) =>
             candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
           timeoutMs: CALLBACK_TIMEOUT_MS,
@@ -181,7 +216,6 @@ describe('improved-task plugin integration', () => {
         });
 
         const reminder = await waitForSessionMessage(sessionID, {
-          role: 'user',
           predicate: (candidate) => candidate.includes('<system-reminder>'),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
@@ -200,7 +234,6 @@ describe('improved-task plugin integration', () => {
         waitIdle(sessionID);
 
         const report = await waitForSessionMessage(sessionID, {
-          role: 'user',
           predicate: (candidate) => candidate.includes(`${PASSPHRASE}:task:sync:new`),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
@@ -227,7 +260,6 @@ describe('improved-task plugin integration', () => {
         waitIdle(sessionID);
 
         const report = await waitForSessionMessage(sessionID, {
-          role: 'user',
           predicate: (candidate) =>
             candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
           timeoutMs: CALLBACK_TIMEOUT_MS,
@@ -257,7 +289,6 @@ describe('improved-task plugin integration', () => {
         expect(initialReply).toContain('ACK');
 
         const report = await waitForSessionMessage(sessionID, {
-          role: 'user',
           predicate: (candidate) =>
             candidate.includes(`${PASSPHRASE}:improved_task:async:new`),
           timeoutMs: CALLBACK_TIMEOUT_MS,
@@ -271,7 +302,6 @@ describe('improved-task plugin integration', () => {
         });
 
         const reminder = await waitForSessionMessage(sessionID, {
-          role: 'user',
           predicate: (candidate) => candidate.includes('<system-reminder>'),
           timeoutMs: CALLBACK_TIMEOUT_MS,
         });
@@ -291,7 +321,6 @@ describe('improved-task plugin integration', () => {
       try {
         waitIdle(sessionID);
         const firstReport = await waitForSessionMessage(sessionID, {
-          role: 'user',
           predicate: (candidate) =>
             candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
           timeoutMs: CALLBACK_TIMEOUT_MS,
