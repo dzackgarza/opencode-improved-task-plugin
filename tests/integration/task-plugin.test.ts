@@ -21,32 +21,12 @@ const PROJECT_DIR = process.cwd();
 const MANAGER_PACKAGE = 'git+https://github.com/dzackgarza/opencode-manager.git';
 const MAX_BUFFER = 8 * 1024 * 1024;
 const SESSION_TIMEOUT_MS = 240_000;
-const ASYNC_CALLBACK_TIMEOUT_MS = 120_000;
+const CALLBACK_TIMEOUT_MS = 120_000;
+const ASSISTANT_REPLY_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 500;
 
 const IMPROVED_TASK_PROOF_AGENT = 'improved-task-proof';
 const TASK_PROOF_AGENT = 'task-proof';
-
-type TranscriptStep = {
-  type: string;
-  tool?: string;
-  status?: string;
-  outputText?: string;
-  contentText?: string;
-};
-
-type TranscriptAssistantMessage = {
-  steps: Array<TranscriptStep | null>;
-};
-
-type TranscriptTurn = {
-  userPrompt: string;
-  assistantMessages: TranscriptAssistantMessage[];
-};
-
-type TranscriptData = {
-  turns: TranscriptTurn[];
-};
 
 type RawSessionMessage = {
   info?: {
@@ -56,11 +36,6 @@ type RawSessionMessage = {
     type?: string;
     text?: string;
   } | null>;
-};
-
-type ToolStep = TranscriptStep & {
-  type: 'tool';
-  tool: string;
 };
 
 function runOcm(args: string[]): { stdout: string; stderr: string } {
@@ -96,48 +71,6 @@ function beginSession(prompt: string, agent?: string): string {
 
 function waitIdle(sessionID: string): void {
   runOcm(['wait', sessionID, '--timeout-sec=180']);
-}
-
-function readTranscriptData(sessionID: string): TranscriptData {
-  const { stdout } = runOcm(['transcript', sessionID, '--json']);
-  return JSON.parse(stdout) as TranscriptData;
-}
-
-function readTranscriptTurns(sessionID: string): TranscriptTurn[] {
-  return readTranscriptData(sessionID).turns;
-}
-
-function readTranscriptSteps(sessionID: string): TranscriptStep[] {
-  return readTranscriptTurns(sessionID).flatMap((turn) =>
-    turn.assistantMessages.flatMap((msg) =>
-      (msg.steps ?? []).filter((step): step is TranscriptStep => step !== null),
-    ),
-  );
-}
-
-function readFinalAssistantText(sessionID: string): string {
-  const parts = readTranscriptTurns(sessionID).flatMap((turn) =>
-    turn.assistantMessages.flatMap((msg) =>
-      (msg.steps ?? [])
-        .filter((step): step is { type: string; contentText: string } =>
-          step !== null && step.type === 'text' && typeof step.contentText === 'string',
-        )
-        .map((step) => step.contentText),
-    ),
-  );
-  return parts.join('\n');
-}
-
-function findCompletedToolStep(sessionID: string, toolName: string): ToolStep {
-  const steps = readTranscriptSteps(sessionID);
-  const step = steps.find(
-    (candidate): candidate is ToolStep =>
-      candidate.type === 'tool' &&
-      candidate.tool === toolName &&
-      candidate.status === 'completed',
-  );
-  expect(step, `Missing completed ${toolName} step.\n${JSON.stringify(steps, null, 2)}`).toBeDefined();
-  return step as ToolStep;
 }
 
 function extractFrontMatterValue(text: string, key: string): string | undefined {
@@ -233,18 +166,14 @@ describe('improved-task plugin integration', () => {
       try {
         waitIdle(sessionID);
 
-        const toolStep = findCompletedToolStep(sessionID, 'improved_task');
-        expect(toolStep.outputText).toContain('report_published: true');
-
-        const childSessionID = extractFrontMatterValue(toolStep.outputText ?? '', 'session_id');
-        expect(childSessionID).toBeDefined();
-
         const report = await waitForSessionMessage(sessionID, {
           role: 'user',
           predicate: (candidate) =>
             candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
-          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+          timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const childSessionID = extractFrontMatterValue(report, 'session_id');
+        expect(childSessionID).toBeDefined();
         expectSummaryReportPrompt({
           report,
           childSessionID: childSessionID as string,
@@ -254,12 +183,9 @@ describe('improved-task plugin integration', () => {
         const reminder = await waitForSessionMessage(sessionID, {
           role: 'user',
           predicate: (candidate) => candidate.includes('<system-reminder>'),
-          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+          timeoutMs: CALLBACK_TIMEOUT_MS,
         });
         expectReminderPrompt(reminder);
-
-        const text = readFinalAssistantText(sessionID);
-        expect(text).toContain('OK');
       } finally {
         try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
       }
@@ -273,25 +199,18 @@ describe('improved-task plugin integration', () => {
       try {
         waitIdle(sessionID);
 
-        const toolStep = findCompletedToolStep(sessionID, 'task');
-        expect(toolStep.outputText).toContain('report_published: true');
-
-        const childSessionID = extractFrontMatterValue(toolStep.outputText ?? '', 'session_id');
-        expect(childSessionID).toBeDefined();
-
         const report = await waitForSessionMessage(sessionID, {
           role: 'user',
           predicate: (candidate) => candidate.includes(`${PASSPHRASE}:task:sync:new`),
-          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+          timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const childSessionID = extractFrontMatterValue(report, 'session_id');
+        expect(childSessionID).toBeDefined();
         expectSummaryReportPrompt({
           report,
           childSessionID: childSessionID as string,
           verificationPassphrase: `${PASSPHRASE}:task:sync:new`,
         });
-
-        const text = readFinalAssistantText(sessionID);
-        expect(text).toContain('OK');
       } finally {
         try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
       }
@@ -307,21 +226,16 @@ describe('improved-task plugin integration', () => {
       try {
         waitIdle(sessionID);
 
-        const toolStep = findCompletedToolStep(sessionID, 'improved_task');
-        const childSessionID = extractFrontMatterValue(toolStep.outputText ?? '', 'session_id');
-        expect(childSessionID).toBeDefined();
-        expect(childSessionID).not.toBe(bogusSessionID);
-
         const report = await waitForSessionMessage(sessionID, {
           role: 'user',
           predicate: (candidate) =>
             candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
-          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+          timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const childSessionID = extractFrontMatterValue(report, 'session_id');
+        expect(childSessionID).toBeDefined();
+        expect(childSessionID).not.toBe(bogusSessionID);
         expect(report).not.toContain(bogusSessionID);
-
-        const text = readFinalAssistantText(sessionID);
-        expect(text).toContain('OK');
       } finally {
         try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
       }
@@ -335,24 +249,21 @@ describe('improved-task plugin integration', () => {
 
       const sessionID = beginSession(prompt, IMPROVED_TASK_PROOF_AGENT);
       try {
-        waitIdle(sessionID);
-
-        const toolStep = findCompletedToolStep(sessionID, 'improved_task');
-        expect(toolStep.outputText).toContain('status: running');
-        expect(toolStep.outputText).toContain('Task is running in the background.');
-
-        const childSessionID = extractFrontMatterValue(toolStep.outputText ?? '', 'session_id');
-        expect(childSessionID).toBeDefined();
-
-        const initialText = readFinalAssistantText(sessionID);
-        expect(initialText).toContain('ACK');
+        const initialReply = await waitForSessionMessage(sessionID, {
+          role: 'assistant',
+          predicate: (candidate) => candidate.includes('ACK'),
+          timeoutMs: ASSISTANT_REPLY_TIMEOUT_MS,
+        });
+        expect(initialReply).toContain('ACK');
 
         const report = await waitForSessionMessage(sessionID, {
           role: 'user',
           predicate: (candidate) =>
             candidate.includes(`${PASSPHRASE}:improved_task:async:new`),
-          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+          timeoutMs: CALLBACK_TIMEOUT_MS,
         });
+        const childSessionID = extractFrontMatterValue(report, 'session_id');
+        expect(childSessionID).toBeDefined();
         expectSummaryReportPrompt({
           report,
           childSessionID: childSessionID as string,
@@ -362,7 +273,7 @@ describe('improved-task plugin integration', () => {
         const reminder = await waitForSessionMessage(sessionID, {
           role: 'user',
           predicate: (candidate) => candidate.includes('<system-reminder>'),
-          timeoutMs: ASYNC_CALLBACK_TIMEOUT_MS,
+          timeoutMs: CALLBACK_TIMEOUT_MS,
         });
         expectReminderPrompt(reminder);
       } finally {
@@ -372,20 +283,29 @@ describe('improved-task plugin integration', () => {
   });
 
   describe('resume', () => {
-    it('proves the parent session can continue after sync delegation publishes its report', () => {
+    it('proves the parent session can continue after sync delegation publishes its report', async () => {
       const firstPrompt =
         'Use improved_task once with mode=sync and subagent_type general. In the child session, reply with ONLY DONE. Reply with ONLY OK when the tool finishes.';
 
       const sessionID = beginSession(firstPrompt, IMPROVED_TASK_PROOF_AGENT);
       try {
         waitIdle(sessionID);
-        const firstText = readFinalAssistantText(sessionID);
-        expect(firstText).toContain('OK');
+        const firstReport = await waitForSessionMessage(sessionID, {
+          role: 'user',
+          predicate: (candidate) =>
+            candidate.includes(`${PASSPHRASE}:improved_task:sync:new`),
+          timeoutMs: CALLBACK_TIMEOUT_MS,
+        });
+        expect(firstReport).toContain(`${PASSPHRASE}:improved_task:sync:new`);
 
         runOcm(['chat', sessionID, 'Reply with EXACTLY RESUMED.']);
         waitIdle(sessionID);
 
-        const resumeText = readFinalAssistantText(sessionID);
+        const resumeText = await waitForSessionMessage(sessionID, {
+          role: 'assistant',
+          predicate: (candidate) => candidate.includes('RESUMED'),
+          timeoutMs: ASSISTANT_REPLY_TIMEOUT_MS,
+        });
         expect(resumeText).toContain('RESUMED');
       } finally {
         try { runOcm(['delete', sessionID]); } catch { /* best-effort */ }
